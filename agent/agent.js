@@ -5,6 +5,7 @@ const { chatWithPuter, closePuterBridge } = require("./puterBridge");
 
 const SERVER_URL = process.env.AGENT_SERVER_URL || "http://localhost:3000";
 const MAX_ITERATIONS = Number(process.env.AGENT_MAX_ITERATIONS || 5);
+const AUTO_PUSH = process.env.AGENT_AUTO_PUSH === "true";
 
 async function runAgent(goal, options = {}) {
   if (!goal) throw new Error("Goal string is required");
@@ -19,13 +20,17 @@ async function runAgent(goal, options = {}) {
 
   try {
     for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration += 1) {
-      await postStatus("editing", goal, `Iteration ${iteration}: applying changes`, logs, repoPath);
+      await postStatus("editing", goal, `Iteration ${iteration}: asking GPT for code edits`, logs, repoPath);
 
-      const editPrompt = buildEditPrompt(goal, context, logs);
+      const latestContext = await collectRepoContext(repoPath);
+      const editPrompt = buildEditPrompt(goal, latestContext, logs);
       const response = await chatWithAI(editPrompt);
 
-      logs.push(`AI edit response:\n${response}`);
+      logs.push(`GPT edit response:\n${response}`);
       await applyPatchOrEdit(response, repoPath, logs);
+
+      const diff = await getGitDiff(repoPath);
+      logs.push(`Current diff:\n${diff.slice(0, 12000) || "No diff"}`);
 
       await postStatus("testing", goal, `Iteration ${iteration}: running checks`, logs, repoPath);
       const check = await runChecks(repoPath);
@@ -33,17 +38,28 @@ async function runAgent(goal, options = {}) {
       logs.push(check.output);
 
       if (check.ok) {
-        await postStatus("ready_to_push", goal, "Checks passed. Waiting for push approval.", logs, repoPath);
-        const approved = await requestPushApproval({ goal, repoPath, logs });
+        const summary = await buildChangeSummary(goal, repoPath, logs);
+        logs.push(`Change summary:\n${summary}`);
+
+        await postStatus("ready_to_push", goal, "Checks passed. Waiting for phone approval.", logs, repoPath);
+        const approved = await requestPushApproval({ goal, repoPath, logs, summary });
         if (!approved) {
           await postStatus("idle", goal, "Push rejected by phone", logs, repoPath);
           return { ok: false, reason: "Push rejected" };
         }
-        await postStatus("done", goal, "Approved. Ready for manual push.", logs, repoPath);
-        return { ok: true };
+
+        if (AUTO_PUSH) {
+          await postStatus("pushing", goal, "Approved. Committing and pushing changes.", logs, repoPath);
+          const pushResult = await commitAndPush(repoPath, summary, logs);
+          await postStatus("done", goal, "Approved changes pushed.", logs, repoPath);
+          return { ok: true, pushed: true, pushResult };
+        }
+
+        await postStatus("done", goal, "Approved. Auto-push disabled; changes are ready for manual push.", logs, repoPath);
+        return { ok: true, pushed: false, reason: "AGENT_AUTO_PUSH is not true" };
       }
 
-      logs.push("Checks failed. Asking AI for correction.");
+      logs.push("Checks failed. Sending failure output back to GPT for correction.");
     }
 
     await postStatus("failed", goal, "Max iterations reached", logs, repoPath);
@@ -56,8 +72,8 @@ async function runAgent(goal, options = {}) {
 async function collectRepoContext(repoPath = process.cwd()) {
   const files = await listFiles(repoPath);
   const selected = files
-    .filter(file => /\.(js|jsx|ts|tsx|kt|java|json|md|sh)$/.test(file))
-    .slice(0, 80);
+    .filter(file => /\.(js|jsx|ts|tsx|kt|java|json|md|sh|gradle|xml)$/.test(file))
+    .slice(0, 120);
 
   const entries = [];
   for (const file of selected) {
@@ -73,7 +89,7 @@ async function applyPatchOrEdit(aiResponse, repoPath, logs) {
   const edits = parseFileBlocks(aiResponse);
 
   if (!edits.length) {
-    logs.push("No file blocks found in AI response. No files changed.");
+    logs.push("No file blocks found in GPT response. No files changed.");
     return;
   }
 
@@ -125,6 +141,50 @@ function getCheckCommands() {
   return ["npm test -- --watch=false", "npm run lint"];
 }
 
+async function buildChangeSummary(goal, repoPath, logs) {
+  const diff = await getGitDiff(repoPath);
+  if (!diff.trim()) return `No file changes for goal: ${goal}`;
+
+  const prompt = [
+    "Summarize these code changes as a concise git commit message.",
+    "Return only one line, 72 characters or less if possible.",
+    `Goal: ${goal}`,
+    `Diff:\n${diff.slice(0, 16000)}`,
+    `Logs:\n${logs.slice(-5).join("\n\n")}`
+  ].join("\n\n");
+
+  const summary = await chatWithAI(prompt);
+  return sanitizeCommitMessage(summary) || `agent: implement ${goal}`;
+}
+
+async function commitAndPush(repoPath, commitMessage, logs) {
+  const status = await run("git status --short", repoPath);
+  logs.push(`Git status before commit:\n${status.output || "clean"}`);
+
+  if (!status.output.trim()) {
+    return { committed: false, pushed: false, reason: "No changes to commit" };
+  }
+
+  const add = await run("git add .", repoPath);
+  logs.push(`git add:\n${add.output || "ok"}`);
+  if (!add.ok) throw new Error(`git add failed: ${add.output}`);
+
+  const commit = await run(`git commit -m ${shellQuote(commitMessage)}`, repoPath);
+  logs.push(`git commit:\n${commit.output || "ok"}`);
+  if (!commit.ok) throw new Error(`git commit failed: ${commit.output}`);
+
+  const push = await run("git push", repoPath);
+  logs.push(`git push:\n${push.output || "ok"}`);
+  if (!push.ok) throw new Error(`git push failed: ${push.output}`);
+
+  return { committed: true, pushed: true, message: commitMessage };
+}
+
+async function getGitDiff(repoPath) {
+  const result = await run("git diff -- .", repoPath);
+  return result.output || "";
+}
+
 async function requestPushApproval(payload) {
   const response = await fetch(`${SERVER_URL}/agent/push-request`, {
     method: "POST",
@@ -150,7 +210,8 @@ async function chatWithAI(prompt) {
 
 function buildPlanPrompt(goal, context) {
   return [
-    "You are an autonomous coding agent.",
+    "You are GPT acting as the coding brain for a local orchestrator.",
+    "The local agent can only read files, write complete file replacements, run checks, commit, and push after phone approval.",
     "Return a concise implementation plan first.",
     "When later asked for edits, return complete file replacement blocks only in this format:",
     "```file:relative/path.ext",
@@ -163,7 +224,9 @@ function buildPlanPrompt(goal, context) {
 
 function buildEditPrompt(goal, context, logs) {
   return [
+    "You are GPT generating code for a local orchestrator.",
     "Implement the requested goal using complete file replacement blocks only.",
+    "The local orchestrator will write these files, run checks, and ask the phone before pushing.",
     "Do not include destructive shell commands.",
     "Do not delete directories.",
     "Use this exact output format for every changed file:",
@@ -206,6 +269,19 @@ function safeResolve(repoPath, relativePath) {
   return targetPath;
 }
 
+function sanitizeCommitMessage(message) {
+  return String(message || "")
+    .split("\n")[0]
+    .replace(/^['"`]+|['"`]+$/g, "")
+    .replace(/[\r\n]/g, " ")
+    .trim()
+    .slice(0, 120);
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'"'"'`)}'`;
+}
+
 function run(command, cwd) {
   return new Promise(resolve => {
     childProcess.exec(command, { cwd, timeout: 120000 }, (error, stdout, stderr) => {
@@ -241,6 +317,7 @@ module.exports = {
   applyPatchOrEdit,
   runChecks,
   requestPushApproval,
+  commitAndPush,
   chatWithAI,
   parseFileBlocks
 };
