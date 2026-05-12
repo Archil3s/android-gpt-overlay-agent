@@ -31,6 +31,7 @@ import {
 import {
   getAgentState,
   ingestAgentPushRequest,
+  ingestAgentPushResult,
   ingestAgentStatus,
   resolveAgentApproval,
   subscribeAgentStore
@@ -99,6 +100,11 @@ export default function App() {
         ingestAgentPushRequest(message);
         setAgentVisible(true);
         notifyAgentApprovalRequired(message).catch(() => {});
+        return;
+      }
+
+      if (message.type === "agent_push_result") {
+        ingestAgentPushResult(message);
         return;
       }
 
