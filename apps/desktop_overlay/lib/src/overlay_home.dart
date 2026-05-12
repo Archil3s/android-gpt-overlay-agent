@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -14,6 +16,10 @@ class OverlayHome extends StatefulWidget {
 
 class _OverlayHomeState extends State<OverlayHome> {
   WebSocketChannel? _channel;
+  Process? _gapdProcess;
+  Timer? _reconnectTimer;
+  bool _disposed = false;
+  bool _startingGapd = false;
   String _connection = 'disconnected';
   Map<String, dynamic>? _gitRequest;
   Map<String, dynamic>? _agentRequest;
@@ -22,29 +28,119 @@ class _OverlayHomeState extends State<OverlayHome> {
   @override
   void initState() {
     super.initState();
+    _bootstrap();
+  }
+
+  Future<void> _bootstrap() async {
+    _addLog('Bootstrapping local GAP runtime');
+    final running = await _isGapdHealthy();
+    if (!running) {
+      await _startBundledGapd();
+    }
     _connect();
   }
 
-  void _connect() {
+  Future<bool> _isGapdHealthy() async {
     try {
+      final client = HttpClient();
+      final request = await client
+          .getUrl(Uri.parse('http://127.0.0.1:3000/health'))
+          .timeout(const Duration(milliseconds: 700));
+      final response = await request.close().timeout(const Duration(milliseconds: 700));
+      final ok = response.statusCode == 200;
+      client.close(force: true);
+      return ok;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _startBundledGapd() async {
+    if (_startingGapd) return;
+    _startingGapd = true;
+
+    try {
+      final executableDir = File(Platform.resolvedExecutable).parent.path;
+      final gapdPath = '$executableDir${Platform.pathSeparator}gapd.exe';
+      final gapdFile = File(gapdPath);
+
+      if (!await gapdFile.exists()) {
+        _addLog('gapd.exe not found beside overlay executable');
+        return;
+      }
+
+      _addLog('Starting bundled gapd.exe');
+      _gapdProcess = await Process.start(
+        gapdPath,
+        const <String>[],
+        workingDirectory: executableDir,
+        mode: ProcessStartMode.detachedWithStdio,
+      );
+
+      _gapdProcess!.stdout
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen((line) => _addLog('gapd: $line'));
+      _gapdProcess!.stderr
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen((line) => _addLog('gapd error: $line'));
+
+      for (var i = 0; i < 20; i += 1) {
+        if (await _isGapdHealthy()) {
+          _addLog('gapd is ready');
+          return;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+      }
+
+      _addLog('gapd did not become ready before timeout');
+    } catch (error) {
+      _addLog('Failed to start gapd: $error');
+    } finally {
+      _startingGapd = false;
+    }
+  }
+
+  void _connect() {
+    if (_disposed) return;
+
+    try {
+      _channel?.sink.close();
       final channel = WebSocketChannel.connect(Uri.parse('ws://127.0.0.1:3000/ws'));
       _channel = channel;
       setState(() => _connection = 'connecting');
 
       channel.stream.listen(
         _handleMessage,
-        onDone: () => setState(() => _connection = 'disconnected'),
-        onError: (Object error) => setState(() {
-          _connection = 'error';
-          _logs.insert(0, 'WebSocket error: $error');
-        }),
+        onDone: () {
+          if (_disposed) return;
+          setState(() => _connection = 'disconnected');
+          _scheduleReconnect();
+        },
+        onError: (Object error) {
+          if (_disposed) return;
+          setState(() => _connection = 'error');
+          _addLog('WebSocket error: $error');
+          _scheduleReconnect();
+        },
       );
     } catch (error) {
-      setState(() {
-        _connection = 'error';
-        _logs.insert(0, 'Connect failed: $error');
-      });
+      setState(() => _connection = 'error');
+      _addLog('Connect failed: $error');
+      _scheduleReconnect();
     }
+  }
+
+  void _scheduleReconnect() {
+    if (_disposed) return;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = Timer(const Duration(seconds: 2), () async {
+      if (!await _isGapdHealthy()) {
+        await _startBundledGapd();
+      }
+      _connect();
+    });
   }
 
   void _handleMessage(dynamic raw) {
@@ -70,9 +166,7 @@ class _OverlayHomeState extends State<OverlayHome> {
         _logs.insert(0, 'Message: $type');
       }
 
-      if (_logs.length > 200) {
-        _logs.removeRange(200, _logs.length);
-      }
+      _trimLogs();
     });
   }
 
@@ -98,9 +192,26 @@ class _OverlayHomeState extends State<OverlayHome> {
     setState(() => _agentRequest = null);
   }
 
+  void _addLog(String line) {
+    if (_disposed) return;
+    setState(() {
+      _logs.insert(0, line);
+      _trimLogs();
+    });
+  }
+
+  void _trimLogs() {
+    if (_logs.length > 200) {
+      _logs.removeRange(200, _logs.length);
+    }
+  }
+
   @override
   void dispose() {
+    _disposed = true;
+    _reconnectTimer?.cancel();
     _channel?.sink.close();
+    _gapdProcess?.kill();
     super.dispose();
   }
 
