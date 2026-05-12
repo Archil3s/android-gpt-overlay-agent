@@ -74,6 +74,7 @@ type ChatHTTPrequest struct {
 
 type ChatHTTPResponse struct {
 	Response string `json:"response"`
+	Provider string `json:"provider,omitempty"`
 	Error    string `json:"error,omitempty"`
 }
 
