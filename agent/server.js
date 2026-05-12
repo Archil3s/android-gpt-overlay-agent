@@ -29,13 +29,13 @@ function createServer() {
         return;
       }
 
-      if (message.type === "git_push_response" || message.type === "agent_push_response") {
-        const item = pending.get(message.id);
-        if (!item) return;
+      if (message.type === "git_push_response") {
+        resolveApproval(clients, pending, message.id, message.decision, "git_push_result");
+        return;
+      }
 
-        clearTimeout(item.timeout);
-        pending.delete(message.id);
-        item.resolve(message.decision === "approve");
+      if (message.type === "agent_push_response") {
+        resolveApproval(clients, pending, message.id, message.decision, "agent_push_result");
       }
     });
 
@@ -56,12 +56,13 @@ function createServer() {
 
     broadcast(clients, request);
 
-    try {
-      const approved = await waitForApproval(pending, id);
-      res.json({ approved });
-    } catch {
-      res.json({ approved: false });
-    }
+    const approved = await waitForApproval(clients, pending, {
+      id,
+      resultType: "git_push_result",
+      request
+    });
+
+    res.json({ approved });
   });
 
   app.post("/agent/status", requireSecret, (req, res) => {
@@ -84,12 +85,13 @@ function createServer() {
 
     broadcast(clients, request);
 
-    try {
-      const approved = await waitForApproval(pending, id);
-      res.json({ approved });
-    } catch {
-      res.json({ approved: false });
-    }
+    const approved = await waitForApproval(clients, pending, {
+      id,
+      resultType: "agent_push_result",
+      request
+    });
+
+    res.json({ approved });
   });
 
   function requireSecret(req, res, next) {
@@ -101,15 +103,50 @@ function createServer() {
   return { app, server, wss, clients, pending };
 }
 
-function waitForApproval(pending, id) {
-  return new Promise((resolve, reject) => {
+function waitForApproval(clients, pending, item) {
+  return new Promise(resolve => {
     const timeout = setTimeout(() => {
-      pending.delete(id);
-      reject(new Error("Approval timed out"));
+      pending.delete(item.id);
+      const result = buildResultMessage(item.resultType, item.id, "timeout", item.request);
+      broadcast(clients, result);
+      resolve(false);
     }, APPROVAL_TIMEOUT_MS);
 
-    pending.set(id, { resolve, timeout });
+    pending.set(item.id, {
+      ...item,
+      resolve,
+      timeout
+    });
   });
+}
+
+function resolveApproval(clients, pending, id, decision, resultType) {
+  const item = pending.get(id);
+  if (!item) {
+    broadcast(clients, buildResultMessage(resultType, id, "missing"));
+    return;
+  }
+
+  clearTimeout(item.timeout);
+  pending.delete(id);
+
+  const normalizedDecision = decision === "approve" ? "approved" : "rejected";
+  broadcast(clients, buildResultMessage(item.resultType, id, normalizedDecision, item.request));
+  item.resolve(normalizedDecision === "approved");
+}
+
+function buildResultMessage(type, id, decision, request = {}) {
+  return {
+    type,
+    id,
+    decision,
+    approved: decision === "approved",
+    branch: request.branch,
+    repoPath: request.repoPath,
+    goal: request.goal,
+    summary: request.summary,
+    completedAt: new Date().toISOString()
+  };
 }
 
 function broadcast(clients, message) {
@@ -126,4 +163,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createServer };
+module.exports = { createServer, buildResultMessage };
