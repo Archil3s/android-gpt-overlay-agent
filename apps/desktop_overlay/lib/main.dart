@@ -1,7 +1,29 @@
 import 'package:flutter/material.dart';
+import 'package:window_manager/window_manager.dart';
+
 import 'src/overlay_home.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await windowManager.ensureInitialized();
+
+  const options = WindowOptions(
+    size: Size(460, 620),
+    minimumSize: Size(280, 92),
+    center: false,
+    backgroundColor: Colors.transparent,
+    skipTaskbar: false,
+    titleBarStyle: TitleBarStyle.hidden,
+    alwaysOnTop: true,
+  );
+
+  await windowManager.waitUntilReadyToShow(options, () async {
+    await windowManager.setAsFrameless();
+    await windowManager.setAlwaysOnTop(true);
+    await windowManager.show();
+    await windowManager.focus();
+  });
+
   runApp(const GapOverlayApp());
 }
 
