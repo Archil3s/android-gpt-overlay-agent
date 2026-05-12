@@ -1,6 +1,7 @@
 const fs = require("fs/promises");
 const path = require("path");
 const childProcess = require("child_process");
+const { chatWithPuter, closePuterBridge } = require("./puterBridge");
 
 const SERVER_URL = process.env.AGENT_SERVER_URL || "http://localhost:3000";
 const MAX_ITERATIONS = Number(process.env.AGENT_MAX_ITERATIONS || 5);
@@ -16,36 +17,40 @@ async function runAgent(goal, options = {}) {
 
   const logs = [`Plan received:\n${plan}`];
 
-  for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration += 1) {
-    await postStatus("editing", goal, `Iteration ${iteration}: applying changes`, logs, repoPath);
+  try {
+    for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration += 1) {
+      await postStatus("editing", goal, `Iteration ${iteration}: applying changes`, logs, repoPath);
 
-    const editPrompt = buildEditPrompt(goal, context, logs);
-    const response = await chatWithAI(editPrompt);
+      const editPrompt = buildEditPrompt(goal, context, logs);
+      const response = await chatWithAI(editPrompt);
 
-    logs.push(`AI edit response:\n${response}`);
-    await applyPatchOrEdit(response, repoPath, logs);
+      logs.push(`AI edit response:\n${response}`);
+      await applyPatchOrEdit(response, repoPath, logs);
 
-    await postStatus("testing", goal, `Iteration ${iteration}: running checks`, logs, repoPath);
-    const check = await runChecks(repoPath);
+      await postStatus("testing", goal, `Iteration ${iteration}: running checks`, logs, repoPath);
+      const check = await runChecks(repoPath);
 
-    logs.push(check.output);
+      logs.push(check.output);
 
-    if (check.ok) {
-      await postStatus("ready_to_push", goal, "Checks passed. Waiting for push approval.", logs, repoPath);
-      const approved = await requestPushApproval({ goal, repoPath, logs });
-      if (!approved) {
-        await postStatus("idle", goal, "Push rejected by phone", logs, repoPath);
-        return { ok: false, reason: "Push rejected" };
+      if (check.ok) {
+        await postStatus("ready_to_push", goal, "Checks passed. Waiting for push approval.", logs, repoPath);
+        const approved = await requestPushApproval({ goal, repoPath, logs });
+        if (!approved) {
+          await postStatus("idle", goal, "Push rejected by phone", logs, repoPath);
+          return { ok: false, reason: "Push rejected" };
+        }
+        await postStatus("done", goal, "Approved. Ready for manual push.", logs, repoPath);
+        return { ok: true };
       }
-      await postStatus("done", goal, "Approved. Ready for manual push.", logs, repoPath);
-      return { ok: true };
+
+      logs.push("Checks failed. Asking AI for correction.");
     }
 
-    logs.push("Checks failed. Asking AI for correction.");
+    await postStatus("failed", goal, "Max iterations reached", logs, repoPath);
+    return { ok: false, reason: "Max iterations reached" };
+  } finally {
+    await closePuterBridge().catch(() => {});
   }
-
-  await postStatus("failed", goal, "Max iterations reached", logs, repoPath);
-  return { ok: false, reason: "Max iterations reached" };
 }
 
 async function collectRepoContext(repoPath = process.cwd()) {
@@ -65,16 +70,39 @@ async function collectRepoContext(repoPath = process.cwd()) {
 }
 
 async function applyPatchOrEdit(aiResponse, repoPath, logs) {
-  logs.push("TODO: implement safe patch parser. No files changed by placeholder.");
-  logs.push("Expected future format: fenced blocks with file paths and complete replacement content.");
+  const edits = parseFileBlocks(aiResponse);
+
+  if (!edits.length) {
+    logs.push("No file blocks found in AI response. No files changed.");
+    return;
+  }
+
+  for (const edit of edits) {
+    const targetPath = safeResolve(repoPath, edit.path);
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    await fs.writeFile(targetPath, edit.content, "utf8");
+    logs.push(`Wrote ${edit.path}`);
+  }
+}
+
+function parseFileBlocks(text) {
+  const edits = [];
+  const pattern = /```(?:file:)?([^\n`]+)\n([\s\S]*?)```/g;
+  let match;
+
+  while ((match = pattern.exec(text)) !== null) {
+    const filePath = match[1].trim();
+    const content = match[2].replace(/\n$/, "");
+
+    if (!filePath || filePath.includes("..") || path.isAbsolute(filePath)) continue;
+    edits.push({ path: filePath, content });
+  }
+
+  return edits;
 }
 
 async function runChecks(repoPath) {
-  const commands = [
-    "npm test -- --watch=false",
-    "npm run lint"
-  ];
-
+  const commands = getCheckCommands();
   let output = "";
 
   for (const command of commands) {
@@ -87,6 +115,14 @@ async function runChecks(repoPath) {
   }
 
   return { ok: true, output };
+}
+
+function getCheckCommands() {
+  if (process.env.AGENT_CHECK_COMMANDS) {
+    return process.env.AGENT_CHECK_COMMANDS.split("&&").map(command => command.trim()).filter(Boolean);
+  }
+
+  return ["npm test -- --watch=false", "npm run lint"];
 }
 
 async function requestPushApproval(payload) {
@@ -109,17 +145,35 @@ async function postStatus(status, goal, currentStep, logs, repoPath) {
 }
 
 async function chatWithAI(prompt) {
-  throw new Error(
-    "Puter.js browser bridge is not implemented for Node yet. Add a Playwright/browser bridge here."
-  );
+  return chatWithPuter(prompt);
 }
 
 function buildPlanPrompt(goal, context) {
-  return `Goal:\n${goal}\n\nRepo context:\n${formatContext(context)}\n\nReturn an implementation plan.`;
+  return [
+    "You are an autonomous coding agent.",
+    "Return a concise implementation plan first.",
+    "When later asked for edits, return complete file replacement blocks only in this format:",
+    "```file:relative/path.ext",
+    "file contents",
+    "```",
+    `Goal:\n${goal}`,
+    `Repo context:\n${formatContext(context)}`
+  ].join("\n\n");
 }
 
 function buildEditPrompt(goal, context, logs) {
-  return `Goal:\n${goal}\n\nContext:\n${formatContext(context)}\n\nLogs:\n${logs.join("\n\n")}\n\nReturn safe code edits only.`;
+  return [
+    "Implement the requested goal using complete file replacement blocks only.",
+    "Do not include destructive shell commands.",
+    "Do not delete directories.",
+    "Use this exact output format for every changed file:",
+    "```file:relative/path.ext",
+    "file contents",
+    "```",
+    `Goal:\n${goal}`,
+    `Context:\n${formatContext(context)}`,
+    `Logs:\n${logs.join("\n\n")}`
+  ].join("\n\n");
 }
 
 function formatContext(context) {
@@ -139,6 +193,17 @@ async function listFiles(dir, base = dir) {
   }
 
   return out;
+}
+
+function safeResolve(repoPath, relativePath) {
+  const targetPath = path.resolve(repoPath, relativePath);
+  const root = path.resolve(repoPath);
+
+  if (!targetPath.startsWith(root + path.sep)) {
+    throw new Error(`Unsafe file path rejected: ${relativePath}`);
+  }
+
+  return targetPath;
 }
 
 function run(command, cwd) {
@@ -176,5 +241,6 @@ module.exports = {
   applyPatchOrEdit,
   runChecks,
   requestPushApproval,
-  chatWithAI
+  chatWithAI,
+  parseFileBlocks
 };
