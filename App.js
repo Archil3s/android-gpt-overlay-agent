@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Pressable, SafeAreaView, StatusBar, StyleSheet, Text, View } from "react-native";
+import { SafeAreaView, StatusBar, StyleSheet } from "react-native";
 import AgentStatus from "./src/components/AgentStatus";
 import Bubble from "./src/components/Bubble";
 import ChatPanel from "./src/components/ChatPanel";
+import ControlPanel from "./src/components/ControlPanel";
 import GitConfirm from "./src/components/GitConfirm";
 import PuterBridge from "./src/components/PuterBridge";
 import { APP_CONFIG, COLORS } from "./src/config";
@@ -27,16 +28,40 @@ import {
   notifyAgentStatus,
   notifyGitPushRequest
 } from "./src/services/notifications";
+import {
+  getAgentState,
+  ingestAgentPushRequest,
+  ingestAgentStatus,
+  resolveAgentApproval,
+  subscribeAgentStore
+} from "./src/state/agentStore";
+import {
+  getGitState,
+  ingestGitRequest,
+  ingestGitResult,
+  resolveGitRequest,
+  subscribeGitStore
+} from "./src/state/gitStore";
 
 export default function App() {
   const [chatVisible, setChatVisible] = useState(false);
-  const [gitRequest, setGitRequest] = useState(null);
-  const [agentStatus, setAgentStatus] = useState(null);
   const [agentVisible, setAgentVisible] = useState(false);
+  const [gitVisible, setGitVisible] = useState(false);
+  const [gitState, setGitState] = useState(getGitState());
+  const [agentState, setAgentState] = useState(getAgentState());
   const [connectionStatus, setConnectionStatus] = useState("disconnected");
   const [overlayStatus, setOverlayStatus] = useState("checking");
   const [overlayMessage, setOverlayMessage] = useState("");
   const [lastError, setLastError] = useState("");
+
+  useEffect(() => {
+    const unGit = subscribeGitStore(setGitState);
+    const unAgent = subscribeAgentStore(setAgentState);
+    return () => {
+      unGit();
+      unAgent();
+    };
+  }, []);
 
   useEffect(() => {
     initializeNotifications().catch(error => {
@@ -53,25 +78,25 @@ export default function App() {
       }
 
       if (message.type === "git_push_request") {
-        setGitRequest(message);
+        ingestGitRequest(message);
+        setGitVisible(true);
         notifyGitPushRequest(message).catch(() => {});
         return;
       }
 
+      if (message.type === "git_push_result") {
+        ingestGitResult(message);
+        return;
+      }
+
       if (message.type === "agent_status") {
-        setAgentStatus(message);
+        ingestAgentStatus(message);
         notifyAgentStatus(message).catch(() => {});
         return;
       }
 
       if (message.type === "agent_push_request") {
-        const nextStatus = {
-          ...message,
-          status: "ready_to_push",
-          currentStep: "Agent is requesting approval before push",
-          logs: message.logs || []
-        };
-        setAgentStatus(nextStatus);
+        ingestAgentPushRequest(message);
         setAgentVisible(true);
         notifyAgentApprovalRequired(message).catch(() => {});
         return;
@@ -85,10 +110,12 @@ export default function App() {
     return unsubscribe;
   }, []);
 
-  const pendingGitCount = gitRequest ? 1 : 0;
+  const pendingGitCount = gitState.pendingRequests.length;
+  const activeGitRequest = gitState.activeRequest;
+  const activeAgentStatus = agentState.approvalRequest || agentState.current;
   const agentActive = useMemo(() => {
-    return Boolean(agentStatus && !["idle", "done", "failed"].includes(agentStatus.status));
-  }, [agentStatus]);
+    return Boolean(agentState.current && !["idle", "done", "failed"].includes(agentState.current.status));
+  }, [agentState]);
 
   async function refreshOverlayPermission() {
     try {
@@ -141,21 +168,25 @@ export default function App() {
 
   function handleApproveGit(requestId) {
     approveGitPush(requestId);
-    setGitRequest(null);
+    resolveGitRequest(requestId, "approved");
+    setGitVisible(false);
   }
 
   function handleRejectGit(requestId) {
     rejectGitPush(requestId);
-    setGitRequest(null);
+    resolveGitRequest(requestId, "rejected");
+    setGitVisible(false);
   }
 
   function handleApproveAgent(requestId) {
     approveAgentPush(requestId);
+    resolveAgentApproval(requestId, "approved");
     setAgentVisible(false);
   }
 
   function handleRejectAgent(requestId) {
     rejectAgentPush(requestId);
+    resolveAgentApproval(requestId, "rejected");
     setAgentVisible(false);
   }
 
@@ -164,32 +195,19 @@ export default function App() {
       <StatusBar barStyle="light-content" backgroundColor={COLORS.background} />
       <PuterBridge />
 
-      <View style={styles.centerCard}>
-        <Text style={styles.title}>{APP_CONFIG.appName}</Text>
-        <Text style={styles.subtitle}>Connection: {connectionStatus}</Text>
-        <Text style={styles.subtitle}>Laptop server: {APP_CONFIG.websocketUrl}</Text>
-        <Text style={styles.subtitle}>Overlay: {overlayStatus}</Text>
-        {!!overlayMessage && <Text style={styles.hint}>{overlayMessage}</Text>}
-        {!!lastError && <Text style={styles.error}>{lastError}</Text>}
-
-        <View style={styles.actions}>
-          <Pressable style={styles.actionButton} onPress={handleStartOverlay}>
-            <Text style={styles.actionText}>START OVERLAY</Text>
-          </Pressable>
-          <Pressable style={styles.secondaryButton} onPress={handleRequestOverlayPermission}>
-            <Text style={styles.secondaryText}>PERMISSION</Text>
-          </Pressable>
-          <Pressable style={styles.stopButton} onPress={handleStopOverlay}>
-            <Text style={styles.stopText}>STOP</Text>
-          </Pressable>
-        </View>
-
-        <Pressable style={styles.refreshButton} onPress={refreshOverlayPermission}>
-          <Text style={styles.refreshText}>REFRESH OVERLAY STATUS</Text>
-        </Pressable>
-
-        <Text style={styles.hint}>Tap the in-app bubble to open chat. Use Start Overlay for the system-level bubble.</Text>
-      </View>
+      <ControlPanel
+        connectionStatus={connectionStatus}
+        overlayStatus={overlayStatus}
+        overlayMessage={overlayMessage || lastError}
+        gitState={gitState}
+        agentState={agentState}
+        onOpenAgent={() => setAgentVisible(true)}
+        onOpenGit={() => setGitVisible(true)}
+        onStartOverlay={handleStartOverlay}
+        onStopOverlay={handleStopOverlay}
+        onRequestPermission={handleRequestOverlayPermission}
+        onRefreshOverlay={refreshOverlayPermission}
+      />
 
       <Bubble
         onPress={() => setChatVisible(true)}
@@ -200,16 +218,16 @@ export default function App() {
       <ChatPanel visible={chatVisible} onClose={() => setChatVisible(false)} />
 
       <GitConfirm
-        visible={Boolean(gitRequest)}
-        request={gitRequest}
+        visible={gitVisible && Boolean(activeGitRequest)}
+        request={activeGitRequest}
         onApprove={handleApproveGit}
         onReject={handleRejectGit}
-        onClose={() => setGitRequest(null)}
+        onClose={() => setGitVisible(false)}
       />
 
       <AgentStatus
-        visible={agentVisible}
-        status={agentStatus}
+        visible={agentVisible && Boolean(activeAgentStatus)}
+        status={activeAgentStatus}
         onClose={() => setAgentVisible(false)}
         onApprovePush={handleApproveAgent}
         onRejectPush={handleRejectAgent}
@@ -222,92 +240,5 @@ const styles = StyleSheet.create({
   screen: {
     flex: 1,
     backgroundColor: COLORS.background
-  },
-  centerCard: {
-    margin: 20,
-    padding: 18,
-    borderRadius: 18,
-    backgroundColor: COLORS.card,
-    borderColor: COLORS.accent,
-    borderWidth: 1
-  },
-  title: {
-    color: COLORS.accent,
-    fontFamily: "JetBrains Mono",
-    fontSize: 18,
-    fontWeight: "700"
-  },
-  subtitle: {
-    color: COLORS.text,
-    fontFamily: "JetBrains Mono",
-    marginTop: 8
-  },
-  hint: {
-    color: COLORS.muted,
-    fontFamily: "JetBrains Mono",
-    marginTop: 12
-  },
-  error: {
-    color: COLORS.reject,
-    fontFamily: "JetBrains Mono",
-    marginTop: 12
-  },
-  actions: {
-    flexDirection: "row",
-    gap: 8,
-    marginTop: 16
-  },
-  actionButton: {
-    flex: 1,
-    backgroundColor: COLORS.accent,
-    borderRadius: 12,
-    padding: 12,
-    alignItems: "center"
-  },
-  actionText: {
-    color: "#00180C",
-    fontFamily: "JetBrains Mono",
-    fontWeight: "800",
-    fontSize: 11
-  },
-  secondaryButton: {
-    flex: 1,
-    backgroundColor: COLORS.pending,
-    borderRadius: 12,
-    padding: 12,
-    alignItems: "center"
-  },
-  secondaryText: {
-    color: "#221700",
-    fontFamily: "JetBrains Mono",
-    fontWeight: "800",
-    fontSize: 11
-  },
-  stopButton: {
-    flex: 1,
-    backgroundColor: COLORS.reject,
-    borderRadius: 12,
-    padding: 12,
-    alignItems: "center"
-  },
-  stopText: {
-    color: "#2B0000",
-    fontFamily: "JetBrains Mono",
-    fontWeight: "800",
-    fontSize: 11
-  },
-  refreshButton: {
-    borderColor: COLORS.agent,
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 12,
-    alignItems: "center",
-    marginTop: 10
-  },
-  refreshText: {
-    color: COLORS.agent,
-    fontFamily: "JetBrains Mono",
-    fontWeight: "800",
-    fontSize: 11
   }
 });
