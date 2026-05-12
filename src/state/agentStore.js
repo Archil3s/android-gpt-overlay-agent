@@ -49,6 +49,22 @@ export function ingestAgentPushRequest(request) {
   emit();
 }
 
+export function ingestAgentPushResult(result) {
+  state = {
+    ...state,
+    approvalRequest: state.approvalRequest?.id === result.id ? null : state.approvalRequest,
+    current: state.current
+      ? {
+          ...state.current,
+          status: result.approved ? "approved" : result.decision || "rejected",
+          currentStep: result.approved ? "Phone approved push" : `Phone result: ${result.decision}`
+        }
+      : state.current,
+    history: prepend({ ...result, event: "result" }, state.history)
+  };
+  emit();
+}
+
 export function resolveAgentApproval(requestId, decision) {
   state = {
     ...state,
