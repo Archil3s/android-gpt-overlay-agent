@@ -23,6 +23,12 @@ func New() *Bridge {
 	return &Bridge{pending: make(map[string]chan protocol.ChatBridgeResponse)}
 }
 
+func (b *Bridge) Available() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.conn != nil
+}
+
 func (b *Bridge) Attach(conn *websocket.Conn) {
 	b.mu.Lock()
 	if b.conn != nil {
