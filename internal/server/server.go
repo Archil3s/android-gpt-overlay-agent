@@ -8,6 +8,7 @@ import (
 
 	"gap/internal/approval"
 	"gap/internal/protocol"
+	"gap/internal/puterbridge"
 
 	"github.com/gorilla/websocket"
 )
@@ -15,6 +16,7 @@ import (
 type Server struct {
 	approvals *approval.Manager
 	hub       *Hub
+	puter     *puterbridge.Bridge
 	upgrader  websocket.Upgrader
 }
 
@@ -22,6 +24,7 @@ func New(timeout time.Duration) *Server {
 	return &Server{
 		approvals: approval.NewManager(timeout),
 		hub:       NewHub(),
+		puter:     puterbridge.New(),
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
 	}
 }
@@ -30,6 +33,9 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/ws", s.handleWS)
+	mux.HandleFunc("/puter-bridge", s.handlePuterBridgePage)
+	mux.HandleFunc("/puter-ws", s.handlePuterWS)
+	mux.HandleFunc("/chat", s.handleChat)
 	mux.HandleFunc("/git/pre-push", s.handleGitPrePush)
 	mux.HandleFunc("/agent/status", s.handleAgentStatus)
 	mux.HandleFunc("/agent/push-request", s.handleAgentPushRequest)
@@ -38,6 +44,60 @@ func (s *Server) Routes() http.Handler {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handlePuterBridgePage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("content-type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(puterbridge.PageHTML()))
+}
+
+func (s *Server) handlePuterWS(w http.ResponseWriter, r *http.Request) {
+	conn, err := s.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("puter websocket upgrade failed: %v", err)
+		return
+	}
+
+	s.puter.Attach(conn)
+	s.hub.Broadcast(protocol.ConnectionStatus{Type: protocol.TypeConnectionStatus, Status: "puter_bridge_connected"})
+
+	go func() {
+		defer s.puter.Detach(conn)
+		defer conn.Close()
+		for {
+			_, payload, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			s.puter.HandleMessage(payload)
+		}
+	}()
+}
+
+func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	var request protocol.ChatHTTPrequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeJSON(w, http.StatusBadRequest, protocol.ChatHTTPResponse{Error: "invalid chat request"})
+		return
+	}
+
+	if request.Message == "" {
+		writeJSON(w, http.StatusBadRequest, protocol.ChatHTTPResponse{Error: "message is required"})
+		return
+	}
+
+	response, err := s.puter.Chat(request.Message)
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, protocol.ChatHTTPResponse{Error: err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, protocol.ChatHTTPResponse{Response: response})
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
