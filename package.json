@@ -1,0 +1,23 @@
+{
+  "name": "android-gpt-overlay-agent",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "agent:server": "node agent/server.js",
+    "agent:run": "node agent/agent.js",
+    "lint": "echo \"Add React Native lint config\"",
+    "test": "echo \"Add tests\""
+  },
+  "dependencies": {
+    "@react-native-clipboard/clipboard": "^1.14.1",
+    "@notifee/react-native": "^9.1.8",
+    "express": "^4.19.2",
+    "nanoid": "^5.0.7",
+    "react": "^18.2.0",
+    "react-native": "^0.74.0",
+    "react-native-markdown-display": "^7.0.2",
+    "react-native-webview": "^13.10.5",
+    "ws": "^8.17.1"
+  },
+  "devDependencies": {}
+}
