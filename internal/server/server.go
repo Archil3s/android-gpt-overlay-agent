@@ -28,7 +28,7 @@ func New(timeout time.Duration) *Server {
 		approvals: approval.NewManager(timeout),
 		hub:       NewHub(),
 		puter:     puter,
-		ai:        aiprovider.NewRouter(aiprovider.NewPuterProvider(puter), aiprovider.NewOllamaProvider()),
+		ai:        aiprovider.NewRouter(aiprovider.NewOllamaProvider(), aiprovider.NewPuterProvider(puter)),
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
 	}
 }
