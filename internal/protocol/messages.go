@@ -3,13 +3,16 @@ package protocol
 import "time"
 
 const (
-	TypeConnectionStatus = "connection_status"
-	TypeGitPushRequest  = "git_push_request"
-	TypeGitPushResult   = "git_push_result"
-	TypeAgentStatus     = "agent_status"
+	TypeConnectionStatus  = "connection_status"
+	TypeGitPushRequest   = "git_push_request"
+	TypeGitPushResult    = "git_push_result"
+	TypeAgentStatus      = "agent_status"
 	TypeAgentPushRequest = "agent_push_request"
-	TypeAgentPushResult = "agent_push_result"
-	TypeError           = "error"
+	TypeAgentPushResult  = "agent_push_result"
+	TypeChatRequest      = "chat_request"
+	TypeChatResponse     = "chat_response"
+	TypePuterReady       = "puter_ready"
+	TypeError            = "error"
 )
 
 type ConnectionStatus struct {
@@ -63,6 +66,28 @@ type AgentPushRequest struct {
 	Summary   string    `json:"summary"`
 	Logs      []string  `json:"logs"`
 	Timestamp time.Time `json:"timestamp"`
+}
+
+type ChatHTTPrequest struct {
+	Message string `json:"message"`
+}
+
+type ChatHTTPResponse struct {
+	Response string `json:"response"`
+	Error    string `json:"error,omitempty"`
+}
+
+type ChatBridgeRequest struct {
+	Type    string `json:"type"`
+	ID      string `json:"id"`
+	Message string `json:"message"`
+}
+
+type ChatBridgeResponse struct {
+	Type     string `json:"type"`
+	ID       string `json:"id"`
+	Response string `json:"response"`
+	Error    string `json:"error,omitempty"`
 }
 
 type ErrorMessage struct {
