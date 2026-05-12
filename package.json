@@ -8,6 +8,8 @@
     "agent:server": "node agent/server.js",
     "agent:run": "node agent/agent.js",
     "agent:install-browser": "npx playwright install chromium",
+    "dev:git-request": "node agent/devSendGitRequest.js",
+    "dev:agent-status": "node agent/devSendAgentStatus.js",
     "lint": "eslint .",
     "test": "jest"
   },
