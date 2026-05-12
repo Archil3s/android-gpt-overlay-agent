@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"gap/internal/aiprovider"
 	"gap/internal/approval"
 	"gap/internal/protocol"
 	"gap/internal/puterbridge"
@@ -17,14 +18,17 @@ type Server struct {
 	approvals *approval.Manager
 	hub       *Hub
 	puter     *puterbridge.Bridge
+	ai        *aiprovider.Router
 	upgrader  websocket.Upgrader
 }
 
 func New(timeout time.Duration) *Server {
+	puter := puterbridge.New()
 	return &Server{
 		approvals: approval.NewManager(timeout),
 		hub:       NewHub(),
-		puter:     puterbridge.New(),
+		puter:     puter,
+		ai:        aiprovider.NewRouter(aiprovider.NewPuterProvider(puter), aiprovider.NewOllamaProvider()),
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
 	}
 }
@@ -32,6 +36,7 @@ func New(timeout time.Duration) *Server {
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/providers", s.handleProviders)
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.HandleFunc("/puter-bridge", s.handlePuterBridgePage)
 	mux.HandleFunc("/puter-ws", s.handlePuterWS)
@@ -43,7 +48,11 @@ func (s *Server) Routes() http.Handler {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "providers": s.ai.Statuses()})
+}
+
+func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"providers": s.ai.Statuses()})
 }
 
 func (s *Server) handlePuterBridgePage(w http.ResponseWriter, r *http.Request) {
@@ -91,13 +100,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response, err := s.puter.Chat(request.Message)
+	response, provider, err := s.ai.Chat(request.Message)
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, protocol.ChatHTTPResponse{Error: err.Error()})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, protocol.ChatHTTPResponse{Response: response})
+	writeJSON(w, http.StatusOK, protocol.ChatHTTPResponse{Response: response, Provider: provider})
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
