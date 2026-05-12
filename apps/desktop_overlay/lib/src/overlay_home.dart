@@ -19,13 +19,16 @@ class _OverlayHomeState extends State<OverlayHome> {
   WebSocketChannel? _channel;
   Process? _gapdProcess;
   Timer? _reconnectTimer;
+  final TextEditingController _chatController = TextEditingController();
   bool _disposed = false;
   bool _startingGapd = false;
   bool _compact = false;
+  bool _sendingChat = false;
   String _connection = 'disconnected';
   Map<String, dynamic>? _gitRequest;
   Map<String, dynamic>? _agentRequest;
   final List<String> _logs = <String>[];
+  final List<_ChatMessage> _chatMessages = <_ChatMessage>[];
 
   @override
   void initState() {
@@ -39,6 +42,7 @@ class _OverlayHomeState extends State<OverlayHome> {
     if (!running) {
       await _startBundledGapd();
     }
+    await _openPuterBridge();
     _connect();
   }
 
@@ -104,6 +108,22 @@ class _OverlayHomeState extends State<OverlayHome> {
     }
   }
 
+  Future<void> _openPuterBridge() async {
+    try {
+      const url = 'http://127.0.0.1:3000/puter-bridge';
+      if (Platform.isWindows) {
+        await Process.start('cmd', <String>['/c', 'start', '', url], mode: ProcessStartMode.detached);
+      } else if (Platform.isMacOS) {
+        await Process.start('open', <String>[url], mode: ProcessStartMode.detached);
+      } else if (Platform.isLinux) {
+        await Process.start('xdg-open', <String>[url], mode: ProcessStartMode.detached);
+      }
+      _addLog('Opened Puter bridge page');
+    } catch (error) {
+      _addLog('Could not open Puter bridge automatically: $error');
+    }
+  }
+
   void _connect() {
     if (_disposed) return;
 
@@ -152,6 +172,9 @@ class _OverlayHomeState extends State<OverlayHome> {
     setState(() {
       if (type == 'connection_status') {
         _connection = message['status'] as String? ?? 'connected';
+        if (_connection == 'puter_bridge_connected') {
+          _addLog('Puter bridge connected');
+        }
       } else if (type == 'git_push_request') {
         _gitRequest = message;
         _compact = false;
@@ -174,6 +197,45 @@ class _OverlayHomeState extends State<OverlayHome> {
 
       _trimLogs();
     });
+  }
+
+  Future<void> _sendChat() async {
+    final message = _chatController.text.trim();
+    if (message.isEmpty || _sendingChat) return;
+
+    setState(() {
+      _sendingChat = true;
+      _chatController.clear();
+      _chatMessages.insert(0, _ChatMessage(role: 'user', text: message));
+    });
+
+    try {
+      final client = HttpClient();
+      final request = await client.postUrl(Uri.parse('http://127.0.0.1:3000/chat'));
+      request.headers.contentType = ContentType.json;
+      request.write(jsonEncode(<String, String>{'message': message}));
+      final response = await request.close().timeout(const Duration(minutes: 2));
+      final body = await response.transform(utf8.decoder).join();
+      client.close(force: true);
+
+      final json = jsonDecode(body) as Map<String, dynamic>;
+      if (response.statusCode >= 400) {
+        throw Exception(json['error'] ?? 'chat failed');
+      }
+
+      setState(() {
+        _chatMessages.insert(0, _ChatMessage(role: 'assistant', text: json['response'] as String? ?? ''));
+      });
+    } catch (error) {
+      setState(() {
+        _chatMessages.insert(0, _ChatMessage(role: 'system', text: 'Chat failed: $error'));
+      });
+      _addLog('Chat failed: $error');
+    } finally {
+      if (!_disposed) {
+        setState(() => _sendingChat = false);
+      }
+    }
   }
 
   void _respondGit(String decision) {
@@ -229,6 +291,7 @@ class _OverlayHomeState extends State<OverlayHome> {
   void dispose() {
     _disposed = true;
     _reconnectTimer?.cancel();
+    _chatController.dispose();
     _channel?.sink.close();
     _gapdProcess?.kill();
     super.dispose();
@@ -311,6 +374,11 @@ class _OverlayHomeState extends State<OverlayHome> {
               ),
             ),
             IconButton(
+              tooltip: 'Open Puter bridge',
+              onPressed: _openPuterBridge,
+              icon: const Icon(Icons.link, size: 18),
+            ),
+            IconButton(
               tooltip: 'Compact',
               onPressed: _toggleCompact,
               icon: const Icon(Icons.bubble_chart, size: 18),
@@ -328,7 +396,9 @@ class _OverlayHomeState extends State<OverlayHome> {
           ],
         ),
         Text('gapd: $_connection', style: const TextStyle(fontFamily: 'monospace')),
-        const SizedBox(height: 16),
+        const SizedBox(height: 12),
+        _buildChat(),
+        const SizedBox(height: 12),
         if (_gitRequest != null)
           ApprovalCard(
             title: 'Git push approval',
@@ -343,7 +413,7 @@ class _OverlayHomeState extends State<OverlayHome> {
             approve: () => _respondAgent('approve'),
             reject: () => _respondAgent('reject'),
           ),
-        const SizedBox(height: 16),
+        const SizedBox(height: 12),
         const Text(
           'Live logs',
           style: TextStyle(color: Color(0xFFA78BFA), fontFamily: 'monospace'),
@@ -364,4 +434,73 @@ class _OverlayHomeState extends State<OverlayHome> {
       ],
     );
   }
+
+  Widget _buildChat() {
+    return Container(
+      decoration: BoxDecoration(
+        border: Border.all(color: const Color(0xFFA78BFA)),
+        borderRadius: BorderRadius.circular(12),
+        color: const Color(0xFF101010),
+      ),
+      padding: const EdgeInsets.all(10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('GPT Chat', style: TextStyle(color: Color(0xFFA78BFA), fontFamily: 'monospace')),
+          const SizedBox(height: 8),
+          SizedBox(
+            height: 120,
+            child: ListView.builder(
+              reverse: true,
+              itemCount: _chatMessages.length,
+              itemBuilder: (context, index) {
+                final item = _chatMessages[index];
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    '${item.role}: ${item.text}',
+                    style: TextStyle(
+                      color: item.role == 'user' ? const Color(0xFF00FF88) : Colors.white,
+                      fontFamily: 'monospace',
+                      fontSize: 12,
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _chatController,
+                  minLines: 1,
+                  maxLines: 3,
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                  decoration: const InputDecoration(
+                    hintText: 'Ask GPT...',
+                    isDense: true,
+                    border: OutlineInputBorder(),
+                  ),
+                  onSubmitted: (_) => _sendChat(),
+                ),
+              ),
+              const SizedBox(width: 8),
+              FilledButton(
+                onPressed: _sendingChat ? null : _sendChat,
+                child: Text(_sendingChat ? '...' : 'SEND'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ChatMessage {
+  const _ChatMessage({required this.role, required this.text});
+
+  final String role;
+  final String text;
 }
