@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:window_manager/window_manager.dart';
 
 import 'approval_card.dart';
 
@@ -20,6 +21,7 @@ class _OverlayHomeState extends State<OverlayHome> {
   Timer? _reconnectTimer;
   bool _disposed = false;
   bool _startingGapd = false;
+  bool _compact = false;
   String _connection = 'disconnected';
   Map<String, dynamic>? _gitRequest;
   Map<String, dynamic>? _agentRequest;
@@ -152,9 +154,13 @@ class _OverlayHomeState extends State<OverlayHome> {
         _connection = message['status'] as String? ?? 'connected';
       } else if (type == 'git_push_request') {
         _gitRequest = message;
+        _compact = false;
+        _expandWindow();
         _logs.insert(0, 'Git approval requested: ${message['branch'] ?? message['id']}');
       } else if (type == 'agent_push_request') {
         _agentRequest = message;
+        _compact = false;
+        _expandWindow();
         _logs.insert(0, 'Agent push approval requested: ${message['summary'] ?? message['id']}');
       } else if (type == 'agent_status') {
         _logs.insert(0, 'Agent ${message['status']}: ${message['currentStep'] ?? ''}');
@@ -192,6 +198,19 @@ class _OverlayHomeState extends State<OverlayHome> {
     setState(() => _agentRequest = null);
   }
 
+  Future<void> _toggleCompact() async {
+    setState(() => _compact = !_compact);
+    if (_compact) {
+      await windowManager.setSize(const Size(260, 92));
+    } else {
+      await _expandWindow();
+    }
+  }
+
+  Future<void> _expandWindow() async {
+    await windowManager.setSize(const Size(460, 620));
+  }
+
   void _addLog(String line) {
     if (_disposed) return;
     setState(() {
@@ -218,59 +237,131 @@ class _OverlayHomeState extends State<OverlayHome> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Container(
-        color: const Color(0xFF080808),
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+      backgroundColor: Colors.transparent,
+      body: GestureDetector(
+        onPanStart: (_) => windowManager.startDragging(),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          decoration: BoxDecoration(
+            color: const Color(0xFF080808),
+            border: Border.all(color: const Color(0xFF00FF88), width: 1.2),
+            borderRadius: BorderRadius.circular(_compact ? 46 : 18),
+            boxShadow: const [
+              BoxShadow(color: Colors.black54, blurRadius: 18, offset: Offset(0, 8)),
+            ],
+          ),
+          margin: const EdgeInsets.all(8),
+          padding: EdgeInsets.all(_compact ? 12 : 16),
+          child: _compact ? _buildCompact() : _buildExpanded(),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCompact() {
+    final pending = _gitRequest != null || _agentRequest != null;
+    return Row(
+      children: [
+        Container(
+          width: 44,
+          height: 44,
+          decoration: const BoxDecoration(
+            color: Color(0xFF00FF88),
+            shape: BoxShape.circle,
+          ),
+          alignment: Alignment.center,
+          child: const Text(
+            'AI',
+            style: TextStyle(color: Color(0xFF00180C), fontWeight: FontWeight.w900),
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            pending ? 'Approval pending' : 'gapd: $_connection',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontFamily: 'monospace'),
+          ),
+        ),
+        IconButton(
+          tooltip: 'Expand',
+          onPressed: _toggleCompact,
+          icon: const Icon(Icons.open_in_full, size: 18),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildExpanded() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
           children: [
-            const Text(
-              'GAP Overlay',
-              style: TextStyle(
-                color: Color(0xFF00FF88),
-                fontWeight: FontWeight.w800,
-                fontFamily: 'monospace',
-                fontSize: 22,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text('gapd: $_connection', style: const TextStyle(fontFamily: 'monospace')),
-            const SizedBox(height: 16),
-            if (_gitRequest != null)
-              ApprovalCard(
-                title: 'Git push approval',
-                subtitle: '${_gitRequest!['branch'] ?? ''}\n${_gitRequest!['repoPath'] ?? ''}',
-                approve: () => _respondGit('approve'),
-                reject: () => _respondGit('reject'),
-              ),
-            if (_agentRequest != null)
-              ApprovalCard(
-                title: 'Agent push approval',
-                subtitle: '${_agentRequest!['summary'] ?? ''}\n${_agentRequest!['repoPath'] ?? ''}',
-                approve: () => _respondAgent('approve'),
-                reject: () => _respondAgent('reject'),
-              ),
-            const SizedBox(height: 16),
-            const Text(
-              'Live logs',
-              style: TextStyle(color: Color(0xFFA78BFA), fontFamily: 'monospace'),
-            ),
-            const SizedBox(height: 8),
-            Expanded(
-              child: ListView.builder(
-                itemCount: _logs.length,
-                itemBuilder: (context, index) => Padding(
-                  padding: const EdgeInsets.only(bottom: 6),
-                  child: Text(
-                    _logs[index],
-                    style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
-                  ),
+            const Expanded(
+              child: Text(
+                'GAP Overlay',
+                style: TextStyle(
+                  color: Color(0xFF00FF88),
+                  fontWeight: FontWeight.w800,
+                  fontFamily: 'monospace',
+                  fontSize: 22,
                 ),
               ),
             ),
+            IconButton(
+              tooltip: 'Compact',
+              onPressed: _toggleCompact,
+              icon: const Icon(Icons.bubble_chart, size: 18),
+            ),
+            IconButton(
+              tooltip: 'Minimize',
+              onPressed: () => windowManager.minimize(),
+              icon: const Icon(Icons.remove, size: 18),
+            ),
+            IconButton(
+              tooltip: 'Close',
+              onPressed: () => windowManager.close(),
+              icon: const Icon(Icons.close, size: 18),
+            ),
           ],
         ),
-      ),
+        Text('gapd: $_connection', style: const TextStyle(fontFamily: 'monospace')),
+        const SizedBox(height: 16),
+        if (_gitRequest != null)
+          ApprovalCard(
+            title: 'Git push approval',
+            subtitle: '${_gitRequest!['branch'] ?? ''}\n${_gitRequest!['repoPath'] ?? ''}',
+            approve: () => _respondGit('approve'),
+            reject: () => _respondGit('reject'),
+          ),
+        if (_agentRequest != null)
+          ApprovalCard(
+            title: 'Agent push approval',
+            subtitle: '${_agentRequest!['summary'] ?? ''}\n${_agentRequest!['repoPath'] ?? ''}',
+            approve: () => _respondAgent('approve'),
+            reject: () => _respondAgent('reject'),
+          ),
+        const SizedBox(height: 16),
+        const Text(
+          'Live logs',
+          style: TextStyle(color: Color(0xFFA78BFA), fontFamily: 'monospace'),
+        ),
+        const SizedBox(height: 8),
+        Expanded(
+          child: ListView.builder(
+            itemCount: _logs.length,
+            itemBuilder: (context, index) => Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Text(
+                _logs[index],
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
