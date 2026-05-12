@@ -3,21 +3,37 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "start": "react-native start",
+    "android": "react-native run-android",
     "agent:server": "node agent/server.js",
     "agent:run": "node agent/agent.js",
-    "lint": "echo \"Add React Native lint config\"",
-    "test": "echo \"Add tests\""
+    "agent:install-browser": "npx playwright install chromium",
+    "dev:git-request": "node agent/devSendGitRequest.js",
+    "dev:agent-status": "node agent/devSendAgentStatus.js",
+    "lint": "eslint .",
+    "test": "jest"
   },
   "dependencies": {
     "@react-native-clipboard/clipboard": "^1.14.1",
     "@notifee/react-native": "^9.1.8",
     "express": "^4.19.2",
     "nanoid": "^5.0.7",
+    "playwright": "^1.44.0",
     "react": "^18.2.0",
     "react-native": "^0.74.0",
     "react-native-markdown-display": "^7.0.2",
     "react-native-webview": "^13.10.5",
     "ws": "^8.17.1"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "@babel/core": "^7.24.0",
+    "@babel/runtime": "^7.24.0",
+    "@react-native/babel-preset": "^0.74.0",
+    "@react-native/eslint-config": "^0.74.0",
+    "@react-native/metro-config": "^0.74.0",
+    "eslint": "^8.57.0",
+    "jest": "^29.7.0",
+    "metro-react-native-babel-preset": "^0.77.0",
+    "prettier": "^3.2.5"
+  }
 }
